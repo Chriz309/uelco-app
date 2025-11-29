@@ -7,7 +7,7 @@ import base64
 
 # --- CONFIGURATION ---
 # ⚠️ PASTE YOUR WORKING APPS SCRIPT URL HERE
-APPS_SCRIPT_URL = "PASTE_YOUR_WEB_APP_URL_HERE" 
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwJcYe-EOQ9sDKoha3ZSNTVjxuh2EbL1rWYiBS5zvxZnPwK3bPD9nNtm1NGVI-_S_yNLQ/exec" 
 
 ONEDRIVE_URL = "https://uelcoservices-my.sharepoint.com/personal/sonelle_uelco_co_za/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fsonelle%5Fuelco%5Fco%5Fza%2FDocuments%2FUelco%20APP%20testing&viewid=610b061b%2Db513%2D4114%2D8c76%2D59a9d605bddf&ga=1"
 
@@ -29,27 +29,23 @@ st.markdown("""
 # --- HELPER FUNCTIONS ---
 
 def upload_to_drive(file_obj, filename):
-    """Uploads to Drive via Apps Script to use YOUR personal storage quota."""
+    """Uploads to Drive via Apps Script."""
     if "script.google.com" not in APPS_SCRIPT_URL:
         st.error("❌ Error: You haven't pasted the Apps Script Web App URL yet.")
         return None
 
     try:
-        # 1. Convert file to text (base64) so it can travel over the internet
         file_content = file_obj.getvalue()
         base64_data = base64.b64encode(file_content).decode('utf-8')
         
-        # 2. Package the data
         payload = {
             'filename': filename,
             'mimetype': file_obj.type,
             'data': base64_data
         }
         
-        # 3. Send to your "Bridge" script
         response = requests.post(APPS_SCRIPT_URL, data=payload)
         
-        # 4. Check results
         if response.status_code == 200:
             result = response.json()
             if result.get('result') == 'success':
@@ -91,7 +87,7 @@ def save_entry(conn, df, data, index=None):
         st.error(f"Save failed: {e}")
 
 def delete_entry(conn, df, index):
-    """Deletes a row from the dataframe and updates sheets."""
+    """Deletes a row from the dataframe."""
     try:
         updated_df = df.drop(index).reset_index(drop=True)
         conn.update(worksheet="Sheet1", data=updated_df)
@@ -122,7 +118,7 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
         active_df = category_df
         completed_df = pd.DataFrame()
 
-    # --- ADD NEW ---
+    # --- ADD NEW FORM ---
     with st.expander(f"➕ Add New {category_name}", expanded=False):
         with st.form(f"add_form_{category_name}", clear_on_submit=True):
             input_data = {"Category": category_name}
@@ -176,10 +172,29 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
                 
                 save_entry(conn, full_df, input_data)
 
-    # --- VIEW LISTS (WITH CLICKABLE LINKS) ---
+    # --- VIEW LISTS (CLEANED UP) ---
     st.subheader(f"⚡ Active Jobs")
     
-    # Define how columns look (Clickable Links!)
+    # 1. Define distinct visible columns based on category
+    if category_name == "Transformer Servicing":
+        display_cols = [
+            "Client_Name", "Client_Contact", "Service_Type", 
+            "Date_Received", "Place_Received", "Quote_Amount", 
+            "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup",
+            "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"
+        ]
+    else:
+        # For Sales and Cable Faults
+        display_cols = [
+            "Date", "Client_Name", "Client_Contact", "Service_Type",
+            "Technician", "Location", 
+            "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"
+        ]
+
+    # 2. Filter dataframe to only show columns that actually exist in the sheet
+    valid_cols = [c for c in display_cols if c in active_df.columns]
+    
+    # 3. Define Column Config (This makes links clickable)
     column_settings = {
         "Photo_Link": st.column_config.LinkColumn("📷 Photo", display_text="View Photo"),
         "OneDrive_Link": st.column_config.LinkColumn("📂 OneDrive", display_text="Open Folder"),
@@ -187,24 +202,33 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
         "Invoiced": st.column_config.CheckboxColumn("Inv", default=False),
         "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
         "Date_Received": st.column_config.DateColumn("Recv", format="YYYY-MM-DD"),
+        "Quote_Amount": st.column_config.TextColumn("Quote (R)"),
     }
 
-    st.dataframe(
-        active_df, 
-        use_container_width=True, 
-        hide_index=True,
-        column_config=column_settings
-    )
-
-    with st.expander(f"Show Completed Jobs"):
+    # Show Active
+    if not active_df.empty:
         st.dataframe(
-            completed_df, 
+            active_df[valid_cols], 
             use_container_width=True, 
             hide_index=True,
             column_config=column_settings
         )
+    else:
+        st.info("No active jobs.")
 
-    # --- EDIT / DELETE ---
+    # Show Completed
+    with st.expander(f"Show Completed Jobs"):
+        if not completed_df.empty:
+            st.dataframe(
+                completed_df[valid_cols], 
+                use_container_width=True, 
+                hide_index=True,
+                column_config=column_settings
+            )
+        else:
+            st.info("No completed jobs.")
+
+    # --- EDIT / DELETE SECTION ---
     st.divider()
     st.subheader(f"✏️ Manage / Edit Job")
     
