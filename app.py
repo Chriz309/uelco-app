@@ -12,7 +12,8 @@ from fpdf import FPDF
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwJcYe-EOQ9sDKoha3ZSNTVjxuh2EbL1rWYiBS5zvxZnPwK3bPD9nNtm1NGVI-_S_yNLQ/exec" 
 ONEDRIVE_URL = "https://uelcoservices-my.sharepoint.com/personal/sonelle_uelco_co_za/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fsonelle%5Fuelco%5Fco%5Fza%2FDocuments%2FUelco%20APP%20testing&viewid=610b061b%2Db513%2D4114%2D8c76%2D59a9d605bddf&ga=1"
 
-st.set_page_config(page_title="UELCO Mobile", layout="wide")
+# --- 1. NAME CHANGED HERE ---
+st.set_page_config(page_title="UELCO-MANAGER", layout="wide")
 
 # --- CSS ---
 st.markdown("""
@@ -23,7 +24,9 @@ st.markdown("""
         padding: 10px 20px; border-radius: 8px; text-decoration: none; 
         font-weight: bold; text-align: center;
     }
-    .header-link:hover { background-color: #005a9e; color: white; }
+    .status-box { padding: 10px; border-radius: 5px; margin-bottom: 10px; font-weight: bold; text-align: center; }
+    .unsaved { background-color: #ffeeba; color: #856404; border: 1px solid #ffeeba; }
+    .saved { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -77,36 +80,64 @@ def upload_to_drive(file_obj, filename):
         return resp.json().get('link') if resp.status_code == 200 and resp.json().get('result') == 'success' else None
     except: return None
 
-def save_entry(conn, df, data, index=None, rerun=True):
-    for k, v in data.items():
-        if isinstance(v, (datetime, pd.Timestamp)): data[k] = v.strftime("%Y-%m-%d")
-        if v is None: data[k] = ""
-    if index is not None:
-        for col, val in data.items(): df.at[index, col] = val
-    else:
-        df = pd.concat([df, pd.DataFrame([data])], ignore_index=True)
-    conn.update(worksheet="Sheet1", data=df)
-    st.cache_data.clear()
-    if rerun: st.toast("Saved!", icon='💾'); st.rerun()
-
-def delete_entry(conn, df, index):
-    df = df.drop(index).reset_index(drop=True)
-    conn.update(worksheet="Sheet1", data=df)
-    st.cache_data.clear()
-    st.toast("Deleted!", icon='🗑️'); st.rerun()
-
 def parse_date_safe(date_val):
     if pd.isnull(date_val) or date_val == "": return None
     try: return pd.to_datetime(date_val).date()
     except: return None
 
-def render_category_tab(conn, full_df, category_name, sub_services=None):
-    if "Category" in full_df.columns:
-        category_df = full_df[full_df["Category"] == category_name]
-    else:
-        category_df = pd.DataFrame()
+# --- CORE DATA LOGIC ---
 
-    # --- ADD NEW FORM ---
+def load_data():
+    """Fetches data from Google Sheets."""
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df = conn.read(worksheet="Sheet1", ttl=0).dropna(how='all')
+        
+        # Normalize
+        for c in ["Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT"]:
+            if c in df.columns: df[c] = pd.to_datetime(df[c], errors='coerce')
+        for c in ["Completed", "Invoiced"]:
+            if c in df.columns: df[c] = df[c].fillna(False).astype(bool)
+        for c in ["Client_Name", "Client_Contact", "Service_Type", "Notes", "Location", "Place_Received", "Quote_Amount", "Technician", "Category", "Photo_Link", "OneDrive_Link"]:
+            if c in df.columns: df[c] = df[c].fillna("").astype(str)
+            
+        return df
+    except Exception as e:
+        st.error(f"Connection Error: {e}")
+        return pd.DataFrame()
+
+def sync_data(force_reload=False):
+    """Writes the current Local State to Google Sheets, then reloads."""
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    df = st.session_state["master_df"]
+    
+    # 1. Write to GSheets
+    conn.update(worksheet="Sheet1", data=df)
+    
+    # 2. Clear Cache & Reload
+    st.cache_data.clear()
+    
+    if force_reload:
+        st.session_state["master_df"] = load_data()
+        st.session_state["unsaved_changes"] = False
+        st.toast("Saved & Synced!", icon="✅")
+        st.rerun()
+
+# --- INITIALIZATION ---
+if "master_df" not in st.session_state:
+    st.session_state["master_df"] = load_data()
+    st.session_state["unsaved_changes"] = False
+
+if "selected_idx" not in st.session_state:
+    st.session_state["selected_idx"] = None
+
+def render_category_tab(category_name, sub_services=None):
+    df = st.session_state["master_df"]
+    
+    if "Category" not in df.columns: return
+    category_df = df[df["Category"] == category_name]
+
+    # --- ADD NEW (INSTANT SAVE) ---
     with st.expander(f"➕ Add New {category_name}", expanded=False):
         with st.form(f"add_form_{category_name}", clear_on_submit=True):
             input_data = {"Category": category_name}
@@ -132,14 +163,21 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
             up_file = st.file_uploader("Upload File")
             input_data["Completed"] = False; input_data["Invoiced"] = False
 
-            if st.form_submit_button("💾 Save"):
+            if st.form_submit_button("💾 Save New Job"):
                 if up_file:
                     ext = up_file.name.split('.')[-1]
                     link = upload_to_drive(up_file, f"{category_name}_{datetime.now().strftime('%M%S')}.{ext}")
                     input_data["Photo_Link"] = link or ""
-                save_entry(conn, full_df, input_data)
+                
+                # Append to Local
+                new_row = pd.DataFrame([input_data])
+                st.session_state["master_df"] = pd.concat([st.session_state["master_df"], new_row], ignore_index=True)
+                
+                # Push to Cloud IMMEDIATELY
+                with st.spinner("Saving..."):
+                    sync_data(force_reload=True)
 
-    # --- SEARCH & FILTER ---
+    # --- SEARCH ---
     st.divider()
     search = st.text_input(f"🔍 Search {category_name}", key=f"s_{category_name}")
     if not category_df.empty and search:
@@ -147,16 +185,11 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
         category_df = category_df[mask]
 
     # --- TABLE CONFIG ---
-    # FORCE Date columns to be present even if data is missing
-    cols_order = []
     if category_name == "Transformer Servicing":
         cols_order = ["Date_Received", "Client_Name", "Client_Contact", "Service_Type", "Notes", "Quote_Amount", "WA_Link", "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"]
     else:
         cols_order = ["Date", "Client_Name", "Client_Contact", "Service_Type", "Notes", "Location", "WA_Link", "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"]
     
-    # Define columns to show (intersect with actual columns)
-    valid_cols = [c for c in cols_order if c in category_df.columns or c == "WA_Link"]
-
     col_config = {
         "Select": st.column_config.CheckboxColumn("Edit", width="small", default=False),
         "WA_Link": st.column_config.LinkColumn("Chat", display_text="WhatsApp"),
@@ -176,79 +209,64 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
         
         st.subheader(title)
         
-        # Prepare Display DF
+        # Prepare View
         df_show = sub_df.copy()
-        
-        # Add Select Column (Stateful)
         df_show.insert(0, "Select", False)
-        # If this row is currently selected in Session State, mark it True
-        if st.session_state.get("selected_idx") in df_show.index:
+        if st.session_state["selected_idx"] in df_show.index:
             df_show.at[st.session_state["selected_idx"], "Select"] = True
 
-        # Add WhatsApp
         if "Client_Contact" in df_show.columns:
             df_show["WA_Link"] = df_show["Client_Contact"].apply(clean_phone_for_whatsapp)
 
-        # Reorder columns explicitly
         final_cols = ["Select"] + [c for c in cols_order if c in df_show.columns]
         
+        # RENDER EDITOR
         edited = st.data_editor(
             df_show[final_cols], 
             use_container_width=True, 
             hide_index=True,
             column_config=col_config,
-            disabled=["WA_Link", "Photo_Link", "OneDrive_Link"], # Allow Select to be edited
+            disabled=["WA_Link", "Photo_Link", "OneDrive_Link"],
             key=f"ed_{category_name}_{key_suf}"
         )
 
-        # LOGIC: Detect Changes
-        # 1. Did Selection Change?
-        sel_rows = edited[edited["Select"] == True]
-        if not sel_rows.empty:
-            new_sel = sel_rows.index[0]
-            if new_sel != st.session_state.get("selected_idx"):
-                st.session_state["selected_idx"] = new_sel
+        # UPDATE LOCAL STATE ONLY (Batched)
+        data_cols = [c for c in final_cols if c not in ["Select", "WA_Link", "Photo_Link", "OneDrive_Link"]]
+        
+        # Check if data changed - SAFE COMPARISON
+        if not edited[data_cols].astype(str).equals(df_show[data_cols].astype(str)):
+            # Safe assignment to prevent ValueError
+            st.session_state["master_df"].loc[edited.index, data_cols] = edited[data_cols]
+            st.session_state["unsaved_changes"] = True
+            st.rerun()
+
+        # Handle Select
+        sel = edited[edited["Select"] == True]
+        if not sel.empty:
+            if sel.index[0] != st.session_state["selected_idx"]:
+                st.session_state["selected_idx"] = sel.index[0]
                 st.rerun()
-        elif st.session_state.get("selected_idx") in edited.index and edited.at[st.session_state["selected_idx"], "Select"] == False:
-            # User unchecked the box
+        elif st.session_state["selected_idx"] in edited.index and not edited.at[st.session_state["selected_idx"], "Select"]:
             st.session_state["selected_idx"] = None
             st.rerun()
 
-        # 2. Did Data Change? (Ignore Select and Links)
-        data_cols = [c for c in final_cols if c not in ["Select", "WA_Link", "Photo_Link", "OneDrive_Link"]]
-        try:
-            old_data = sub_df.loc[edited.index, data_cols]
-            new_data = edited[data_cols]
-            # Loose comparison (astype str) to avoid type mismatch refresh loops
-            if not old_data.astype(str).equals(new_data.astype(str)):
-                full_df.update(edited[data_cols + ["Completed", "Invoiced"]])
-                conn.update(worksheet="Sheet1", data=full_df)
-                st.cache_data.clear()
-                st.toast("Saved!", icon="✅")
-                st.rerun()
-        except: pass
-
-    # Render Active/Old
     active = category_df[~category_df["Completed"]]
     old = category_df[category_df["Completed"]]
     render_table(active, "⚡ Current Jobs", "act")
     st.divider()
     render_table(old, "✅ Old Jobs", "old")
 
-    # --- EDIT FORM (Persistent) ---
-    sel_idx = st.session_state.get("selected_idx")
-    # Only show form if selected index belongs to THIS category
-    if sel_idx is not None and sel_idx in category_df.index:
-        row = full_df.loc[sel_idx]
+    # --- EDIT FORM ---
+    sel_idx = st.session_state["selected_idx"]
+    if sel_idx is not None and sel_idx in st.session_state["master_df"].index:
+        row = st.session_state["master_df"].loc[sel_idx]
         st.divider()
         c_h, c_b = st.columns([2, 1])
         c_h.markdown(f"### ✏️ Editing: {row.get('Client_Name', 'Job')}")
-        c_b.download_button("📄 Download Job Card", create_job_card(row), f"Job_{sel_idx}.pdf", "application/pdf")
+        c_b.download_button("📄 Download Job Card", create_job_card(row.to_dict()), f"Job_{sel_idx}.pdf", "application/pdf")
 
         with st.form(f"edit_{sel_idx}"):
             edit_d = row.to_dict()
-            
-            # Simplified Form (Focus on criticals that aren't in table)
             if category_name == "Transformer Servicing":
                 c1, c2 = st.columns(2)
                 edit_d["Date_Received"] = c1.date_input("Recv Date", parse_date_safe(row.get("Date_Received")))
@@ -259,54 +277,68 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
             edit_d["Notes"] = st.text_area("Notes", row.get("Notes"))
             up_new = st.file_uploader("Upload New File")
             
+            # INSTANT SAVE FOR FORM EDITS
             if st.form_submit_button("💾 Save Changes"):
                 if up_new:
                     ext = up_new.name.split('.')[-1]
                     edit_d["Photo_Link"] = upload_to_drive(up_new, f"Update_{sel_idx}.{ext}")
-                save_entry(conn, full_df, edit_d, sel_idx)
+                
+                # Update Local
+                for k, v in edit_d.items():
+                    if isinstance(v, (datetime, pd.Timestamp)): v = v.strftime("%Y-%m-%d")
+                    st.session_state["master_df"].at[sel_idx, k] = v
+                
+                # Push to Cloud
+                with st.spinner("Saving..."):
+                    sync_data(force_reload=True)
 
             if st.form_submit_button("🗑️ Delete"):
-                st.session_state["selected_idx"] = None # Clear selection before delete
-                delete_entry(conn, full_df, sel_idx)
+                st.session_state["master_df"] = st.session_state["master_df"].drop(sel_idx).reset_index(drop=True)
+                st.session_state["selected_idx"] = None
+                with st.spinner("Deleting..."):
+                    sync_data(force_reload=True)
 
 # --- MAIN ---
 def main():
     c1, c2 = st.columns([3, 1])
-    c1.title("⚡ UELCO System")
-    if c2.button("🔄 Refresh"): st.cache_data.clear(); st.rerun()
-    st.markdown(f'<a href="{ONEDRIVE_URL}" target="_blank" class="header-link">📂 Open OneDrive</a>', unsafe_allow_html=True)
+    # 2. NAME CHANGED HERE
+    c1.title("⚡ UELCO-MANAGER")
+    
+    # REFRESH / SYNC BUTTON
+    if st.session_state["unsaved_changes"]:
+        status = '<div class="status-box unsaved">⚠️ Unsaved Changes - Click Sync</div>'
+        btn_label = "💾 Save & Sync"
+    else:
+        status = '<div class="status-box saved">✅ All Saved</div>'
+        btn_label = "🔄 Sync / Refresh"
+        
+    c2.markdown(status, unsafe_allow_html=True)
+    if c2.button(btn_label, type="primary"):
+        with st.spinner("Syncing data..."):
+            sync_data(force_reload=True)
 
-    try:
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(worksheet="Sheet1", ttl=600).dropna(how='all')
-        # Ensure Dates are datetime
-        for c in ["Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT"]:
-            if c in df.columns: df[c] = pd.to_datetime(df[c], errors='coerce')
-        # Ensure Booleans
-        for c in ["Completed", "Invoiced"]:
-            if c in df.columns: df[c] = df[c].fillna(False).astype(bool)
-        # Ensure Strings
-        for c in ["Client_Name", "Client_Contact", "Service_Type", "Notes", "Location", "Place_Received", "Quote_Amount", "Technician"]:
-            if c in df.columns: df[c] = df[c].fillna("").astype(str)
-    except: st.error("Connection Error"); df = pd.DataFrame()
+    st.markdown(f'<a href="{ONEDRIVE_URL}" target="_blank" class="header-link">📂 Open OneDrive</a>', unsafe_allow_html=True)
 
     t1, t2, t3, t4 = st.tabs(["💰 Sales", "⚡ Transformer", "🔌 Cables", "📝 Notes"])
     
-    with t1: render_category_tab(conn, df, "Sales & Install", ["Order", "Order + Delivery", "Order + Installation", "Quoted", "To Quote"])
-    with t2: render_category_tab(conn, df, "Transformer Servicing", ["Oil Change", "Gasket Replacement", "General Service", "Testing", "Quoted", "To Quote"])
-    with t3: render_category_tab(conn, df, "Cable Faults", ["Thumping/Locating", "Jointing", "Quoted", "To Quote"])
+    with t1: render_category_tab("Sales & Install", ["Order", "Order + Delivery", "Order + Installation", "Quoted", "To Quote"])
+    with t2: render_category_tab("Transformer Servicing", ["Oil Change", "Gasket Replacement", "General Service", "Testing", "Quoted", "To Quote"])
+    with t3: render_category_tab("Cable Faults", ["Thumping/Locating", "Jointing", "Quoted", "To Quote"])
     
     with t4:
         st.header("📝 Notes")
         with st.form("new_note"):
             txt = st.text_area("Note"); up = st.file_uploader("File")
-            if st.form_submit_button("Pin"):
+            if st.form_submit_button("Pin Note"):
                 d = {"Date": datetime.now(), "Category": "General Note", "Notes": txt}
                 if up: d["Photo_Link"] = upload_to_drive(up, f"Note_{datetime.now()}.jpg")
-                save_entry(conn, df, d)
+                st.session_state["master_df"] = pd.concat([st.session_state["master_df"], pd.DataFrame([d])], ignore_index=True)
+                with st.spinner("Saving Note..."):
+                    sync_data(force_reload=True)
         
         st.divider()
-        n_df = df[df["Category"] == "General Note"] if "Category" in df.columns else pd.DataFrame()
+        n_df = st.session_state["master_df"]
+        n_df = n_df[n_df["Category"] == "General Note"] if "Category" in n_df.columns else pd.DataFrame()
         if not n_df.empty:
             st.data_editor(n_df[["Date", "Notes", "Photo_Link"]], hide_index=True, column_config={"Photo_Link": st.column_config.LinkColumn("File")})
 
