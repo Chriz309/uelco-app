@@ -12,7 +12,6 @@ from fpdf import FPDF
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwJcYe-EOQ9sDKoha3ZSNTVjxuh2EbL1rWYiBS5zvxZnPwK3bPD9nNtm1NGVI-_S_yNLQ/exec" 
 ONEDRIVE_URL = "https://uelcoservices-my.sharepoint.com/personal/sonelle_uelco_co_za/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fsonelle%5Fuelco%5Fco%5Fza%2FDocuments%2FUelco%20APP%20testing&viewid=610b061b%2Db513%2D4114%2D8c76%2D59a9d605bddf&ga=1"
 
-# --- 1. NAME CHANGED HERE ---
 st.set_page_config(page_title="UELCO-MANAGER", layout="wide")
 
 # --- CSS ---
@@ -233,7 +232,7 @@ def render_category_tab(category_name, sub_services=None):
         # UPDATE LOCAL STATE ONLY (Batched)
         data_cols = [c for c in final_cols if c not in ["Select", "WA_Link", "Photo_Link", "OneDrive_Link"]]
         
-        # Check if data changed - SAFE COMPARISON
+        # Check if data changed
         if not edited[data_cols].astype(str).equals(df_show[data_cols].astype(str)):
             # Safe assignment to prevent ValueError
             st.session_state["master_df"].loc[edited.index, data_cols] = edited[data_cols]
@@ -260,48 +259,52 @@ def render_category_tab(category_name, sub_services=None):
     sel_idx = st.session_state["selected_idx"]
     if sel_idx is not None and sel_idx in st.session_state["master_df"].index:
         row = st.session_state["master_df"].loc[sel_idx]
-        st.divider()
-        c_h, c_b = st.columns([2, 1])
-        c_h.markdown(f"### ✏️ Editing: {row.get('Client_Name', 'Job')}")
-        c_b.download_button("📄 Download Job Card", create_job_card(row.to_dict()), f"Job_{sel_idx}.pdf", "application/pdf")
-
-        with st.form(f"edit_{sel_idx}"):
-            edit_d = row.to_dict()
-            if category_name == "Transformer Servicing":
-                c1, c2 = st.columns(2)
-                edit_d["Date_Received"] = c1.date_input("Recv Date", parse_date_safe(row.get("Date_Received")))
-                edit_d["Place_Received"] = c1.text_input("Place", row.get("Place_Received"))
-                edit_d["Date_Sent_To_PT"] = c2.date_input("Sent PT", parse_date_safe(row.get("Date_Sent_To_PT")))
-                edit_d["Date_Back_From_PT"] = c2.date_input("Back PT", parse_date_safe(row.get("Date_Back_From_PT")))
+        
+        # --- CRITICAL FIX: Only show form if category matches! ---
+        if row.get("Category") == category_name:
+            st.divider()
+            c_h, c_b = st.columns([2, 1])
+            c_h.markdown(f"### ✏️ Editing: {row.get('Client_Name', 'Job')}")
             
-            edit_d["Notes"] = st.text_area("Notes", row.get("Notes"))
-            up_new = st.file_uploader("Upload New File")
-            
-            # INSTANT SAVE FOR FORM EDITS
-            if st.form_submit_button("💾 Save Changes"):
-                if up_new:
-                    ext = up_new.name.split('.')[-1]
-                    edit_d["Photo_Link"] = upload_to_drive(up_new, f"Update_{sel_idx}.{ext}")
-                
-                # Update Local
-                for k, v in edit_d.items():
-                    if isinstance(v, (datetime, pd.Timestamp)): v = v.strftime("%Y-%m-%d")
-                    st.session_state["master_df"].at[sel_idx, k] = v
-                
-                # Push to Cloud
-                with st.spinner("Saving..."):
-                    sync_data(force_reload=True)
+            # --- Unique Key for Download Button ---
+            c_b.download_button("📄 Download Job Card", create_job_card(row.to_dict()), f"Job_{sel_idx}.pdf", "application/pdf", key=f"dl_pdf_{category_name}_{sel_idx}")
 
-            if st.form_submit_button("🗑️ Delete"):
-                st.session_state["master_df"] = st.session_state["master_df"].drop(sel_idx).reset_index(drop=True)
-                st.session_state["selected_idx"] = None
-                with st.spinner("Deleting..."):
-                    sync_data(force_reload=True)
+            with st.form(f"edit_{sel_idx}"):
+                edit_d = row.to_dict()
+                if category_name == "Transformer Servicing":
+                    c1, c2 = st.columns(2)
+                    edit_d["Date_Received"] = c1.date_input("Recv Date", parse_date_safe(row.get("Date_Received")))
+                    edit_d["Place_Received"] = c1.text_input("Place", row.get("Place_Received"))
+                    edit_d["Date_Sent_To_PT"] = c2.date_input("Sent PT", parse_date_safe(row.get("Date_Sent_To_PT")))
+                    edit_d["Date_Back_From_PT"] = c2.date_input("Back PT", parse_date_safe(row.get("Date_Back_From_PT")))
+                
+                edit_d["Notes"] = st.text_area("Notes", row.get("Notes"))
+                up_new = st.file_uploader("Upload New File")
+                
+                # INSTANT SAVE FOR FORM EDITS
+                if st.form_submit_button("💾 Save Changes"):
+                    if up_new:
+                        ext = up_new.name.split('.')[-1]
+                        edit_d["Photo_Link"] = upload_to_drive(up_new, f"Update_{sel_idx}.{ext}")
+                    
+                    # Update Local
+                    for k, v in edit_d.items():
+                        if isinstance(v, (datetime, pd.Timestamp)): v = v.strftime("%Y-%m-%d")
+                        st.session_state["master_df"].at[sel_idx, k] = v
+                    
+                    # Push to Cloud
+                    with st.spinner("Saving..."):
+                        sync_data(force_reload=True)
+
+                if st.form_submit_button("🗑️ Delete"):
+                    st.session_state["master_df"] = st.session_state["master_df"].drop(sel_idx).reset_index(drop=True)
+                    st.session_state["selected_idx"] = None
+                    with st.spinner("Deleting..."):
+                        sync_data(force_reload=True)
 
 # --- MAIN ---
 def main():
     c1, c2 = st.columns([3, 1])
-    # 2. NAME CHANGED HERE
     c1.title("⚡ UELCO-MANAGER")
     
     # REFRESH / SYNC BUTTON
