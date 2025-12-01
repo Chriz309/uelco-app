@@ -1,4 +1,5 @@
-streamlit
+streamlit>=1.35.0
 pandas
 st-gsheets-connection
-google-api-python-client
+requests
+
