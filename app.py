@@ -6,9 +6,7 @@ import requests
 import base64
 
 # --- CONFIGURATION ---
-# ⚠️ PASTE YOUR WORKING APPS SCRIPT URL HERE
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwJcYe-EOQ9sDKoha3ZSNTVjxuh2EbL1rWYiBS5zvxZnPwK3bPD9nNtm1NGVI-_S_yNLQ/exec" 
-
 ONEDRIVE_URL = "https://uelcoservices-my.sharepoint.com/personal/sonelle_uelco_co_za/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fsonelle%5Fuelco%5Fco%5Fza%2FDocuments%2FUelco%20APP%20testing&viewid=610b061b%2Db513%2D4114%2D8c76%2D59a9d605bddf&ga=1"
 
 st.set_page_config(page_title="UELCO Mobile", layout="wide")
@@ -61,8 +59,9 @@ def upload_to_drive(file_obj, filename):
         st.error(f"❌ Upload Failed Details: {e}") 
         return None
 
-def save_entry(conn, df, data, index=None):
+def save_entry(conn, df, data, index=None, rerun=True):
     """Saves a new entry or updates an existing one."""
+    # Convert dates to strings
     for k, v in data.items():
         if isinstance(v, (datetime, pd.Timestamp)):
             data[k] = v.strftime("%Y-%m-%d")
@@ -71,18 +70,21 @@ def save_entry(conn, df, data, index=None):
 
     try:
         if index is not None:
+            # Update existing row
             for col, val in data.items():
                 df.at[index, col] = val
             updated_df = df
             msg = "Job Updated Successfully!"
         else:
+            # Add new row
             new_row = pd.DataFrame([data])
             updated_df = pd.concat([df, new_row], ignore_index=True)
             msg = "New Job Added Successfully!"
         
         conn.update(worksheet="Sheet1", data=updated_df)
-        st.toast(msg, icon='💾')
-        st.rerun()
+        if rerun:
+            st.toast(msg, icon='💾')
+            st.rerun()
     except Exception as e:
         st.error(f"Save failed: {e}")
 
@@ -105,18 +107,11 @@ def parse_date_safe(date_val):
         return None
 
 def render_category_tab(conn, full_df, category_name, sub_services=None):
-    # Filter Data
+    # Filter Data (Keep original Index for updates)
     if "Category" in full_df.columns:
         category_df = full_df[full_df["Category"] == category_name]
     else:
         category_df = pd.DataFrame()
-
-    if "Completed" in category_df.columns:
-        active_df = category_df[category_df["Completed"] == False]
-        completed_df = category_df[category_df["Completed"] == True]
-    else:
-        active_df = category_df
-        completed_df = pd.DataFrame()
 
     # --- ADD NEW FORM ---
     with st.expander(f"➕ Add New {category_name}", expanded=False):
@@ -156,7 +151,8 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
 
             st.markdown("---")
             input_data["OneDrive_Link"] = st.text_input("🔗 OneDrive Folder Link", key=f"add_od_{category_name}")
-            uploaded_file = st.file_uploader("📷 Upload Job Photo", type=['jpg', 'png', 'jpeg'], key=f"add_up_{category_name}")
+            # CHANGED: Removed type restriction to allow PDFs etc.
+            uploaded_file = st.file_uploader("📎 Upload Document/Photo", key=f"add_up_{category_name}")
             input_data["Notes"] = st.text_area("Notes", key=f"add_nt_{category_name}")
             input_data["Completed"] = False
             input_data["Invoiced"] = False
@@ -164,7 +160,9 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
             if st.form_submit_button("💾 Save New Job"):
                 if uploaded_file:
                     with st.spinner("Uploading..."):
-                        fname = f"{category_name}_{input_data.get('Client_Name', 'Unk')}_{datetime.now().strftime('%M%S')}.jpg"
+                        # Get extension from filename
+                        ext = uploaded_file.name.split('.')[-1]
+                        fname = f"{category_name}_{input_data.get('Client_Name', 'Unk')}_{datetime.now().strftime('%M%S')}.{ext}"
                         link = upload_to_drive(uploaded_file, fname)
                         input_data["Photo_Link"] = link if link else ""
                 else:
@@ -172,147 +170,165 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
                 
                 save_entry(conn, full_df, input_data)
 
-    # --- VIEW LISTS (CLEANED UP) ---
-    st.subheader(f"⚡ Active Jobs")
-    
-    # 1. Define distinct visible columns based on category
+    # --- INTERACTIVE LIST & EDITING ---
+    st.subheader(f"⚡ Job List")
+    st.caption("👇 Tick boxes to update status immediately. Click a row to Edit details.")
+
+    # 1. Define Columns
     if category_name == "Transformer Servicing":
         display_cols = [
             "Client_Name", "Client_Contact", "Service_Type", 
-            "Date_Received", "Place_Received", "Quote_Amount", 
-            "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup",
+            "Date_Received", "Quote_Amount", 
             "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"
         ]
     else:
-        # For Sales and Cable Faults
         display_cols = [
             "Date", "Client_Name", "Client_Contact", "Service_Type",
-            "Technician", "Location", 
+            "Location", 
             "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"
         ]
 
-    # 2. Filter dataframe to only show columns that actually exist in the sheet
-    valid_cols = [c for c in display_cols if c in active_df.columns]
+    # 2. Filter valid columns
+    valid_cols = [c for c in display_cols if c in category_df.columns]
     
-    # 3. Define Column Config (This makes links clickable)
+    # 3. Define Config
     column_settings = {
-        "Photo_Link": st.column_config.LinkColumn("📷 Photo", display_text="View Photo"),
-        "OneDrive_Link": st.column_config.LinkColumn("📂 OneDrive", display_text="Open Folder"),
+        "Photo_Link": st.column_config.LinkColumn("📎 File", display_text="Open"),
+        "OneDrive_Link": st.column_config.LinkColumn("📂 OneDrive", display_text="Folder"),
         "Completed": st.column_config.CheckboxColumn("Done", default=False),
         "Invoiced": st.column_config.CheckboxColumn("Inv", default=False),
         "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
         "Date_Received": st.column_config.DateColumn("Recv", format="YYYY-MM-DD"),
-        "Quote_Amount": st.column_config.TextColumn("Quote (R)"),
+        "Quote_Amount": st.column_config.TextColumn("Quote"),
     }
 
-    # Show Active
-    if not active_df.empty:
-        st.dataframe(
-            active_df[valid_cols], 
+    # 4. DATA EDITOR (Replaces DataFrame)
+    # This allows clicking rows and editing checkboxes directly
+    if not category_df.empty:
+        # Determine which columns are editable (Only Checkboxes)
+        disabled_cols = [c for c in valid_cols if c not in ["Completed", "Invoiced"]]
+        
+        edited_df = st.data_editor(
+            category_df[valid_cols], 
             use_container_width=True, 
             hide_index=True,
-            column_config=column_settings
+            column_config=column_settings,
+            disabled=disabled_cols, # Lock everything except checkboxes
+            key=f"editor_{category_name}",
+            on_change=None,
+            selection_mode="single-row" # Enable row selection
         )
-    else:
-        st.info("No active jobs.")
 
-    # Show Completed
-    with st.expander(f"Show Completed Jobs"):
-        if not completed_df.empty:
-            st.dataframe(
-                completed_df[valid_cols], 
-                use_container_width=True, 
-                hide_index=True,
-                column_config=column_settings
-            )
-        else:
-            st.info("No completed jobs.")
-
-    # --- EDIT / DELETE SECTION ---
-    st.divider()
-    st.subheader(f"✏️ Manage / Edit Job")
-    
-    if not category_df.empty:
-        options = category_df.apply(
-            lambda x: f"{x.name} | {x.get('Client_Name', 'Unknown')} ({x.get('Service_Type', 'Job')})", 
-            axis=1
-        ).tolist()
+        # 5. DETECT CHECKBOX CHANGES
+        # If the user ticked a box, 'edited_df' will differ from 'category_df'
+        # We find the changes and save them.
+        changes_detected = False
         
-        selected_option = st.selectbox(f"Select a {category_name} Job to Edit or Delete:", options, index=None, key=f"sel_{category_name}")
+        # Compare boolean columns to see if they changed
+        # We align indices to ensure we are comparing correctly
+        try:
+            diff_completed = not edited_df["Completed"].equals(category_df.loc[edited_df.index, "Completed"])
+            diff_invoiced = not edited_df["Invoiced"].equals(category_df.loc[edited_df.index, "Invoiced"])
+            
+            if diff_completed or diff_invoiced:
+                # Update the main dataframe
+                full_df.update(edited_df[["Completed", "Invoiced"]])
+                # Push to Google Sheets
+                conn.update(worksheet="Sheet1", data=full_df)
+                st.toast("Status Updated!", icon="✅")
+                # We do not rerun here to avoid jarring UI resets, but data is saved.
+        except Exception as e:
+            # Sometimes index misalignment happens if rows are added/removed elsewhere
+            pass
 
-        if selected_option:
-            row_idx = int(selected_option.split(" | ")[0])
-            row_data = full_df.loc[row_idx]
-
-            with st.form(f"edit_form_{row_idx}"):
+        # 6. DETECT ROW SELECTION (OPEN EDIT FORM)
+        selection = st.session_state[f"editor_{category_name}"].get("selection", {"rows": []})
+        
+        if selection and selection["rows"]:
+            # Get the selected row index relative to the displayed dataframe
+            selected_visual_index = selection["rows"][0]
+            # Get the actual index in the main dataframe
+            actual_index = edited_df.iloc[selected_visual_index].name
+            
+            row_data = full_df.loc[actual_index]
+            
+            st.divider()
+            st.markdown(f"### ✏️ Editing: {row_data.get('Client_Name', 'Job')}")
+            
+            with st.form(f"edit_form_{actual_index}"):
                 edit_data = {"Category": category_name}
 
                 if category_name == "Transformer Servicing":
                     col_e1, col_e2 = st.columns(2)
                     with col_e1:
-                        edit_data["Date_Received"] = st.date_input("Date Received", parse_date_safe(row_data.get("Date_Received")), key=f"e_dr_{row_idx}")
-                        edit_data["Place_Received"] = st.text_input("Place Received", row_data.get("Place_Received", ""), key=f"e_pr_{row_idx}")
-                        edit_data["Quote_Amount"] = st.text_input("Quote Amount", row_data.get("Quote_Amount", ""), key=f"e_qa_{row_idx}")
+                        edit_data["Date_Received"] = st.date_input("Date Received", parse_date_safe(row_data.get("Date_Received")), key=f"e_dr_{actual_index}")
+                        edit_data["Place_Received"] = st.text_input("Place Received", row_data.get("Place_Received", ""), key=f"e_pr_{actual_index}")
+                        edit_data["Quote_Amount"] = st.text_input("Quote Amount", row_data.get("Quote_Amount", ""), key=f"e_qa_{actual_index}")
                     with col_e2:
-                        edit_data["Date_Sent_To_PT"] = st.date_input("Date Sent to PT", parse_date_safe(row_data.get("Date_Sent_To_PT")), key=f"e_ds_{row_idx}")
-                        edit_data["Date_Back_From_PT"] = st.date_input("Date Back from PT", parse_date_safe(row_data.get("Date_Back_From_PT")), key=f"e_db_{row_idx}")
-                        edit_data["Date_Client_Pickup"] = st.date_input("Date Client Pickup", parse_date_safe(row_data.get("Date_Client_Pickup")), key=f"e_dp_{row_idx}")
+                        edit_data["Date_Sent_To_PT"] = st.date_input("Date Sent to PT", parse_date_safe(row_data.get("Date_Sent_To_PT")), key=f"e_ds_{actual_index}")
+                        edit_data["Date_Back_From_PT"] = st.date_input("Date Back from PT", parse_date_safe(row_data.get("Date_Back_From_PT")), key=f"e_db_{actual_index}")
+                        edit_data["Date_Client_Pickup"] = st.date_input("Date Client Pickup", parse_date_safe(row_data.get("Date_Client_Pickup")), key=f"e_dp_{actual_index}")
 
                     st.markdown("---")
-                    edit_data["Client_Name"] = st.text_input("Client Name", row_data.get("Client_Name", ""), key=f"e_cn_{row_idx}")
-                    edit_data["Client_Contact"] = st.text_input("Client Contact", row_data.get("Client_Contact", ""), key=f"e_cc_{row_idx}")
+                    edit_data["Client_Name"] = st.text_input("Client Name", row_data.get("Client_Name", ""), key=f"e_cn_{actual_index}")
+                    edit_data["Client_Contact"] = st.text_input("Client Contact", row_data.get("Client_Contact", ""), key=f"e_cc_{actual_index}")
                     curr_serv = row_data.get("Service_Type", "")
                     s_idx = sub_services.index(curr_serv) if sub_services and curr_serv in sub_services else None
-                    edit_data["Service_Type"] = st.selectbox("Work Required", sub_services, index=s_idx, key=f"e_st_{row_idx}")
+                    edit_data["Service_Type"] = st.selectbox("Work Required", sub_services, index=s_idx, key=f"e_st_{actual_index}")
 
                 else:
                     col_e1, col_e2 = st.columns(2)
                     with col_e1:
-                        edit_data["Date"] = st.date_input("Date", parse_date_safe(row_data.get("Date")), key=f"e_d_{row_idx}")
-                        edit_data["Technician"] = st.text_input("Technician", row_data.get("Technician", ""), key=f"e_t_{row_idx}")
+                        edit_data["Date"] = st.date_input("Date", parse_date_safe(row_data.get("Date")), key=f"e_d_{actual_index}")
+                        edit_data["Technician"] = st.text_input("Technician", row_data.get("Technician", ""), key=f"e_t_{actual_index}")
                     with col_e2:
                         if sub_services:
                             curr_serv = row_data.get("Service_Type", "")
                             s_idx = sub_services.index(curr_serv) if sub_services and curr_serv in sub_services else None
-                            edit_data["Service_Type"] = st.selectbox("Service Type", sub_services, index=s_idx, key=f"e_st_{row_idx}")
+                            edit_data["Service_Type"] = st.selectbox("Service Type", sub_services, index=s_idx, key=f"e_st_{actual_index}")
                         else:
                             edit_data["Service_Type"] = category_name
 
-                    edit_data["Client_Name"] = st.text_input("Client Name", row_data.get("Client_Name", ""), key=f"e_cn_{row_idx}")
-                    edit_data["Client_Contact"] = st.text_input("Client Contact", row_data.get("Client_Contact", ""), key=f"e_cc_{row_idx}")
-                    edit_data["Location"] = st.text_input("Location", row_data.get("Location", ""), key=f"e_loc_{row_idx}")
+                    edit_data["Client_Name"] = st.text_input("Client Name", row_data.get("Client_Name", ""), key=f"e_cn_{actual_index}")
+                    edit_data["Client_Contact"] = st.text_input("Client Contact", row_data.get("Client_Contact", ""), key=f"e_cc_{actual_index}")
+                    edit_data["Location"] = st.text_input("Location", row_data.get("Location", ""), key=f"e_loc_{actual_index}")
 
                 st.markdown("---")
-                edit_data["OneDrive_Link"] = st.text_input("OneDrive Link", row_data.get("OneDrive_Link", ""), key=f"e_od_{row_idx}")
+                edit_data["OneDrive_Link"] = st.text_input("OneDrive Link", row_data.get("OneDrive_Link", ""), key=f"e_od_{actual_index}")
                 
                 curr_photo = row_data.get("Photo_Link", "")
                 if curr_photo and len(str(curr_photo)) > 5:
-                    st.caption(f"Current Photo: [View Link]({curr_photo})")
+                    st.caption(f"Current File: [Open File]({curr_photo})")
                 
-                new_file = st.file_uploader("Upload New Photo (Overwrites old)", type=['jpg', 'png'], key=f"e_up_{row_idx}")
-                edit_data["Notes"] = st.text_area("Notes", row_data.get("Notes", ""), key=f"e_nt_{row_idx}")
+                # CHANGED: Allow any file type update
+                new_file = st.file_uploader("Upload New File (Overwrites old)", key=f"e_up_{actual_index}")
+                edit_data["Notes"] = st.text_area("Notes", row_data.get("Notes", ""), key=f"e_nt_{actual_index}")
 
+                # Note: We don't need checkboxes here anymore as they are in the table, 
+                # but we keep them for manual overrides if needed.
                 col_s1, col_s2 = st.columns(2)
                 with col_s1:
-                    edit_data["Completed"] = st.checkbox("✅ Job Completed", value=bool(row_data.get("Completed", False)), key=f"e_comp_{row_idx}")
+                    edit_data["Completed"] = st.checkbox("✅ Job Completed", value=bool(row_data.get("Completed", False)), key=f"e_comp_{actual_index}")
                 with col_s2:
-                    edit_data["Invoiced"] = st.checkbox("💰 Invoiced", value=bool(row_data.get("Invoiced", False)), key=f"e_inv_{row_idx}")
+                    edit_data["Invoiced"] = st.checkbox("💰 Invoiced", value=bool(row_data.get("Invoiced", False)), key=f"e_inv_{actual_index}")
 
                 col_btn1, col_btn2 = st.columns([1, 1])
                 with col_btn1:
                     if st.form_submit_button("💾 Update Job Details"):
                         if new_file:
-                            with st.spinner("Uploading New Photo..."):
-                                fname = f"{category_name}_{edit_data.get('Client_Name', 'Unk')}_UPDATED.jpg"
+                            with st.spinner("Uploading New File..."):
+                                ext = new_file.name.split('.')[-1]
+                                fname = f"{category_name}_{edit_data.get('Client_Name', 'Unk')}_UPDATED.{ext}"
                                 link = upload_to_drive(new_file, fname)
                                 edit_data["Photo_Link"] = link if link else curr_photo
                         else:
                             edit_data["Photo_Link"] = curr_photo
-                        save_entry(conn, full_df, edit_data, index=row_idx)
+                        save_entry(conn, full_df, edit_data, index=actual_index)
 
                 with col_btn2:
                     if st.form_submit_button("🗑️ Delete Job"):
-                        delete_entry(conn, full_df, index=row_idx)
+                        delete_entry(conn, full_df, index=actual_index)
+
     else:
         st.info("No jobs found in this category.")
 
