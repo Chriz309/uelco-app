@@ -4,6 +4,8 @@ from datetime import datetime
 from streamlit_gsheets import GSheetsConnection
 import requests
 import base64
+import os
+from fpdf import FPDF
 
 # --- CONFIGURATION ---
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwJcYe-EOQ9sDKoha3ZSNTVjxuh2EbL1rWYiBS5zvxZnPwK3bPD9nNtm1NGVI-_S_yNLQ/exec" 
@@ -25,6 +27,105 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- HELPER FUNCTIONS ---
+
+def create_job_card(data):
+    """Generates a Professional PDF Job Card with Template."""
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # 1. LOAD BACKGROUND TEMPLATE
+    # Checks if template.jpg exists. If yes, uses it.
+    if os.path.exists("template.jpg"):
+        try:
+            pdf.image("template.jpg", x=0, y=0, w=210) 
+            # Move cursor down to avoid typing over the header logo
+            # Adjust '50' if your logo is taller/shorter
+            pdf.set_y(50) 
+        except Exception as e:
+            st.error(f"Template Error: {e}")
+            pdf.set_font("Arial", 'B', 16)
+            pdf.cell(0, 10, "UELCO SERVICES (Template Error)", ln=True, align='C')
+    else:
+        # Fallback if no template found
+        pdf.set_font("Arial", 'B', 16)
+        pdf.cell(0, 10, "UELCO SERVICES - JOB CARD", ln=True, align='C')
+        pdf.ln(10)
+
+    # 2. JOB DETAILS TITLE
+    pdf.set_font("Arial", 'B', 12)
+    pdf.set_fill_color(230, 230, 230) # Light Gray
+    pdf.cell(0, 8, "  JOB CARD DETAILS", ln=True, fill=True)
+    pdf.ln(5)
+    
+    # 3. DYNAMIC DATA
+    pdf.set_font("Arial", size=10)
+    
+    def clean(text):
+        """Cleans text to prevent PDF errors with special characters"""
+        return str(text).encode('latin-1', 'replace').decode('latin-1')
+
+    # Define fields to print
+    fields = [
+        ("Reference / Cat", "Category"),
+        ("Client Name", "Client_Name"),
+        ("Contact No", "Client_Contact"),
+        ("Service Type", "Service_Type"),
+        ("Date", "Date"),
+        ("Date Received", "Date_Received"),
+        ("Technician", "Technician"),
+        ("Location", "Location"),
+        ("Quote Amount", "Quote_Amount"),
+    ]
+
+    line_height = 7
+    
+    for label, key in fields:
+        val = data.get(key, "")
+        
+        # Skip empty fields or NaT
+        if val and str(val).strip() != "" and str(val) != "NaT":
+            pdf.set_font("Arial", 'B', 10)
+            pdf.cell(40, line_height, f"{label}:", border=0)
+            
+            pdf.set_font("Arial", size=10)
+            # clean(val) ensures special chars don't crash the PDF
+            pdf.cell(0, line_height, clean(val), border=0, ln=1)
+
+    # 4. NOTES SECTION
+    notes = data.get("Notes", "")
+    if notes:
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 10)
+        pdf.cell(0, 8, "Notes / Description of Work:", ln=True, fill=True)
+        pdf.set_font("Arial", size=10)
+        pdf.multi_cell(0, 6, clean(notes), border=0)
+
+    # 5. SIGNATURE SECTION
+    # Move to bottom of page (but above footer)
+    if pdf.get_y() < 220:
+        pdf.set_y(220) 
+    
+    pdf.ln(5)
+    pdf.set_font("Arial", 'B', 10)
+    
+    # Signature Lines
+    pdf.cell(80, 5, "Technician Signature", 0, 0, 'L')
+    pdf.cell(30, 5, "", 0, 0) # Spacer
+    pdf.cell(80, 5, "Client Signature", 0, 1, 'L')
+    
+    pdf.ln(10) # Space for signing
+    
+    pdf.cell(80, 0, "", "B", 0) # Bottom Border
+    pdf.cell(30, 0, "", 0, 0)
+    pdf.cell(80, 0, "", "B", 1) # Bottom Border
+    
+    pdf.ln(2)
+    pdf.set_font("Arial", 'I', 8)
+    pdf.cell(80, 5, f"Date: {datetime.now().strftime('%Y-%m-%d')}", 0, 0)
+    pdf.cell(30, 5, "", 0, 0)
+    pdf.cell(80, 5, "Date: __________________", 0, 1)
+
+    return pdf.output(dest='S').encode('latin-1')
 
 def upload_to_drive(file_obj, filename):
     if "script.google.com" not in APPS_SCRIPT_URL:
@@ -78,6 +179,7 @@ def save_entry(conn, df, data, index=None, rerun=True):
         
         conn.update(worksheet="Sheet1", data=updated_df)
         
+        # Clear cache to force refresh on next load
         st.cache_data.clear()
         
         if rerun:
@@ -171,7 +273,6 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
     search_term = st.text_input(f"🔍 Search {category_name}", placeholder="Search Client, Location, or details...", key=f"search_{category_name}")
 
     if not category_df.empty and search_term:
-        # Filter Logic: Search across all columns
         mask = category_df.astype(str).apply(lambda x: x.str.contains(search_term, case=False, na=False)).any(axis=1)
         category_df = category_df[mask]
 
@@ -203,7 +304,6 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
         active_jobs = pd.DataFrame()
         old_jobs = pd.DataFrame()
 
-    # Function to render editor and handle updates
     def render_job_table(sub_df, title, key_suffix):
         if sub_df.empty:
             st.info(f"No {title.lower()} found.")
@@ -211,7 +311,7 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
 
         st.subheader(title)
         
-        # Add Select column
+        # Add Select Column (Safe Mode)
         df_editor = sub_df[valid_cols].copy()
         df_editor.insert(0, "Select", False)
 
@@ -224,7 +324,6 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
             key=f"editor_{category_name}_{key_suffix}"
         )
 
-        # Detect Changes
         try:
             original_subset = sub_df.loc[edited_df.index]
             diff_completed = not edited_df["Completed"].equals(original_subset["Completed"])
@@ -241,24 +340,18 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
 
         return edited_df
 
-    # --- RENDER ACTIVE JOBS ---
+    # Render Tables
     edited_active = render_job_table(active_jobs, "⚡ Current Jobs", "active")
-    
     st.divider()
-    
-    # --- RENDER OLD JOBS ---
     edited_old = render_job_table(old_jobs, "✅ Old Jobs (Completed)", "old")
 
-    # --- EDIT LOGIC (Handles selection from EITHER table) ---
+    # --- EDIT LOGIC ---
     selected_index = None
-    
-    # Check Active Table Selection
     if edited_active is not None:
         sel_active = edited_active[edited_active["Select"] == True]
         if not sel_active.empty:
             selected_index = sel_active.index[0]
 
-    # Check Old Table Selection (Overrides active if both selected - unlikely)
     if edited_old is not None:
         sel_old = edited_old[edited_old["Select"] == True]
         if not sel_old.empty:
@@ -268,7 +361,19 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
         row_data = full_df.loc[selected_index]
         
         st.divider()
-        st.markdown(f"### ✏️ Editing: {row_data.get('Client_Name', 'Job')}")
+        col_head, col_dl = st.columns([2, 1])
+        with col_head:
+            st.markdown(f"### ✏️ Editing: {row_data.get('Client_Name', 'Job')}")
+        with col_dl:
+            # --- PDF GENERATION BUTTON ---
+            pdf_bytes = create_job_card(row_data)
+            st.download_button(
+                label="📄 Download Job Card",
+                data=pdf_bytes,
+                file_name=f"JobCard_{row_data.get('Client_Name', 'Job')}.pdf",
+                mime="application/pdf",
+                key=f"dl_pdf_{selected_index}"
+            )
         
         with st.form(f"edit_form_{selected_index}"):
             edit_data = {"Category": category_name}
@@ -351,6 +456,7 @@ def main():
 
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
+        # TTL set to 10 mins (600s) to stop random refreshing
         df = conn.read(worksheet="Sheet1", ttl=600).dropna(how='all')
         
         date_cols = ["Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup"]
@@ -404,7 +510,6 @@ def main():
         st.divider()
         st.subheader("📌 Manage Notes")
         
-        # Search for Notes
         search_note = st.text_input("🔍 Search Notes", key="search_notes")
         
         if "Category" in df.columns:
