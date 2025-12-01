@@ -77,6 +77,10 @@ def save_entry(conn, df, data, index=None, rerun=True):
             msg = "New Job Added Successfully!"
         
         conn.update(worksheet="Sheet1", data=updated_df)
+        
+        # --- FIX: CLEAR CACHE IMMEDIATELY ---
+        st.cache_data.clear()
+        
         if rerun:
             st.toast(msg, icon='💾')
             st.rerun()
@@ -87,6 +91,10 @@ def delete_entry(conn, df, index):
     try:
         updated_df = df.drop(index).reset_index(drop=True)
         conn.update(worksheet="Sheet1", data=updated_df)
+        
+        # --- FIX: CLEAR CACHE IMMEDIATELY ---
+        st.cache_data.clear()
+        
         st.toast("Job Deleted Successfully!", icon='🗑️')
         st.rerun()
     except Exception as e:
@@ -189,10 +197,9 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
     }
 
     if not df_for_editor.empty:
-        # DATA EDITOR (Safe Mode - No selection_mode)
+        # DATA EDITOR
         disabled_cols = [c for c in valid_cols if c not in ["Completed", "Invoiced"]]
         
-        # We REMOVED selection_mode="single-row" to stop the crash
         edited_df = st.data_editor(
             df_for_editor, 
             use_container_width=True, 
@@ -204,7 +211,6 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
 
         # 1. Detect Status Changes (Done/Inv)
         try:
-            # Align indices
             original_subset = category_df.loc[edited_df.index]
             diff_completed = not edited_df["Completed"].equals(original_subset["Completed"])
             diff_invoiced = not edited_df["Invoiced"].equals(original_subset["Invoiced"])
@@ -212,7 +218,10 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
             if diff_completed or diff_invoiced:
                 full_df.update(edited_df[["Completed", "Invoiced"]])
                 conn.update(worksheet="Sheet1", data=full_df)
+                # --- FIX: Clear Cache & Rerun ---
+                st.cache_data.clear()
                 st.toast("Status Updated!", icon="✅")
+                st.rerun()
         except:
             pass
         
@@ -296,15 +305,24 @@ def render_category_tab(conn, full_df, category_name, sub_services=None):
 
 # --- MAIN APP ---
 def main():
-    col_title, col_link = st.columns([3, 1])
+    col_title, col_btn = st.columns([3, 1])
     with col_title:
         st.title("⚡ UELCO System")
-    with col_link:
-        st.markdown(f'<br><a href="{ONEDRIVE_URL}" target="_blank" class="header-link">📂 Open OneDrive</a>', unsafe_allow_html=True)
+    with col_btn:
+        st.write("") # Spacer
+        # --- FIX: Manual Refresh Button ---
+        if st.button("🔄 Refresh Data", type="primary"):
+            st.cache_data.clear()
+            st.rerun()
+            
+    st.markdown(f'<a href="{ONEDRIVE_URL}" target="_blank" class="header-link">📂 Open OneDrive</a>', unsafe_allow_html=True)
 
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(worksheet="Sheet1", ttl=5).dropna(how='all')
+        # --- FIX: INCREASE CACHE TIME TO 10 MINS (600s) ---
+        # This prevents random refreshes while you work.
+        # Use the "Refresh Data" button or the Save actions to update.
+        df = conn.read(worksheet="Sheet1", ttl=600).dropna(how='all')
         
         date_cols = ["Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup"]
         for col in date_cols:
@@ -338,8 +356,20 @@ def main():
         st.header("📝 Quick Notes")
         with st.form("note_form", clear_on_submit=True):
             note_content = st.text_area("Note Content")
+            note_file = st.file_uploader("📎 Attach File (Optional)", key="note_file_up")
+
             if st.form_submit_button("📌 Pin Note"):
                 note_data = {"Date": datetime.now(), "Category": "General Note", "Notes": note_content}
+                
+                if note_file:
+                    with st.spinner("Uploading attachment..."):
+                        ext = note_file.name.split('.')[-1]
+                        fname = f"Note_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
+                        link = upload_to_drive(note_file, fname)
+                        note_data["Photo_Link"] = link if link else ""
+                else:
+                    note_data["Photo_Link"] = ""
+
                 save_entry(conn, df, note_data)
 
         st.divider()
@@ -347,7 +377,25 @@ def main():
         if "Category" in df.columns:
             notes_df = df[df["Category"] == "General Note"]
             if not notes_df.empty:
-                st.dataframe(notes_df[["Date", "Notes"]], use_container_width=True, hide_index=True)
+                if "Photo_Link" not in notes_df.columns:
+                    notes_df["Photo_Link"] = ""
+                
+                note_config = {
+                    "Photo_Link": st.column_config.LinkColumn("📎 File", display_text="Open"),
+                    "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+                    "Notes": st.column_config.TextColumn("Content", width="large")
+                }
+                
+                display_cols = ["Date", "Notes", "Photo_Link"]
+                valid_note_cols = [c for c in display_cols if c in notes_df.columns]
+
+                st.dataframe(
+                    notes_df[valid_note_cols], 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_config=note_config
+                )
+
                 note_options = notes_df.apply(lambda x: f"{x.name} | {x.get('Notes', '')[:30]}...", axis=1).tolist()
                 sel_note = st.selectbox("Select Note to Delete", note_options, index=None)
                 if sel_note:
