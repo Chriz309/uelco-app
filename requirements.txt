@@ -2,4 +2,5 @@ streamlit>=1.35.0
 pandas
 st-gsheets-connection
 requests
+fpdf
 
