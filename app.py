@@ -193,7 +193,8 @@ def render_category_tab(category_name, sub_services=None):
         "Select": st.column_config.CheckboxColumn("Edit", width="small", default=False),
         "WA_Link": st.column_config.LinkColumn("Chat", display_text="WhatsApp"),
         "Photo_Link": st.column_config.LinkColumn("File", display_text="Open"),
-        "OneDrive_Link": st.column_config.LinkColumn("Drive", display_text="Folder"),
+        # REMOVED display_text="Folder" so you can paste URLS
+        "OneDrive_Link": st.column_config.LinkColumn("Drive", width="medium"),
         "Completed": st.column_config.CheckboxColumn("Done"),
         "Invoiced": st.column_config.CheckboxColumn("Inv"),
         "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
@@ -225,7 +226,8 @@ def render_category_tab(category_name, sub_services=None):
             use_container_width=True, 
             hide_index=True,
             column_config=col_config,
-            disabled=["WA_Link", "Photo_Link", "OneDrive_Link"],
+            # Removed OneDrive_Link from disabled so it is editable
+            disabled=["WA_Link", "Photo_Link"],
             key=f"ed_{category_name}_{key_suf}"
         )
 
@@ -234,10 +236,17 @@ def render_category_tab(category_name, sub_services=None):
         
         # Check if data changed
         if not edited[data_cols].astype(str).equals(df_show[data_cols].astype(str)):
-            # Safe assignment to prevent ValueError
+            # Safe assignment
             st.session_state["master_df"].loc[edited.index, data_cols] = edited[data_cols]
             st.session_state["unsaved_changes"] = True
             st.rerun()
+            
+        # Check if OneDrive Link changed specifically (since it's not in data_cols above for safety, let's catch it)
+        if "OneDrive_Link" in edited.columns:
+             if not edited["OneDrive_Link"].astype(str).equals(df_show["OneDrive_Link"].astype(str)):
+                st.session_state["master_df"].loc[edited.index, "OneDrive_Link"] = edited["OneDrive_Link"]
+                st.session_state["unsaved_changes"] = True
+                st.rerun()
 
         # Handle Select
         sel = edited[edited["Select"] == True]
@@ -260,13 +269,11 @@ def render_category_tab(category_name, sub_services=None):
     if sel_idx is not None and sel_idx in st.session_state["master_df"].index:
         row = st.session_state["master_df"].loc[sel_idx]
         
-        # --- CRITICAL FIX: Only show form if category matches! ---
         if row.get("Category") == category_name:
             st.divider()
             c_h, c_b = st.columns([2, 1])
             c_h.markdown(f"### ✏️ Editing: {row.get('Client_Name', 'Job')}")
             
-            # --- Unique Key for Download Button ---
             c_b.download_button("📄 Download Job Card", create_job_card(row.to_dict()), f"Job_{sel_idx}.pdf", "application/pdf", key=f"dl_pdf_{category_name}_{sel_idx}")
 
             with st.form(f"edit_{sel_idx}"):
@@ -281,18 +288,15 @@ def render_category_tab(category_name, sub_services=None):
                 edit_d["Notes"] = st.text_area("Notes", row.get("Notes"))
                 up_new = st.file_uploader("Upload New File")
                 
-                # INSTANT SAVE FOR FORM EDITS
                 if st.form_submit_button("💾 Save Changes"):
                     if up_new:
                         ext = up_new.name.split('.')[-1]
                         edit_d["Photo_Link"] = upload_to_drive(up_new, f"Update_{sel_idx}.{ext}")
                     
-                    # Update Local
                     for k, v in edit_d.items():
                         if isinstance(v, (datetime, pd.Timestamp)): v = v.strftime("%Y-%m-%d")
                         st.session_state["master_df"].at[sel_idx, k] = v
                     
-                    # Push to Cloud
                     with st.spinner("Saving..."):
                         sync_data(force_reload=True)
 
