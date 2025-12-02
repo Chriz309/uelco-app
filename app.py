@@ -109,11 +109,7 @@ def sync_data(force_reload=False):
     """Writes the current Local State to Google Sheets, then reloads."""
     conn = st.connection("gsheets", type=GSheetsConnection)
     df = st.session_state["master_df"]
-    
-    # 1. Write to GSheets
     conn.update(worksheet="Sheet1", data=df)
-    
-    # 2. Clear Cache & Reload
     st.cache_data.clear()
     
     if force_reload:
@@ -140,6 +136,7 @@ def render_category_tab(category_name, sub_services=None):
     with st.expander(f"➕ Add New {category_name}", expanded=False):
         with st.form(f"add_form_{category_name}", clear_on_submit=True):
             input_data = {"Category": category_name}
+            
             if category_name == "Transformer Servicing":
                 c1, c2 = st.columns(2)
                 with c1: input_data["Date_Received"] = st.date_input("Date Received", datetime.now())
@@ -168,11 +165,9 @@ def render_category_tab(category_name, sub_services=None):
                     link = upload_to_drive(up_file, f"{category_name}_{datetime.now().strftime('%M%S')}.{ext}")
                     input_data["Photo_Link"] = link or ""
                 
-                # Append to Local
+                # Append to Local & Sync
                 new_row = pd.DataFrame([input_data])
                 st.session_state["master_df"] = pd.concat([st.session_state["master_df"], new_row], ignore_index=True)
-                
-                # Push to Cloud IMMEDIATELY
                 with st.spinner("Saving..."):
                     sync_data(force_reload=True)
 
@@ -185,9 +180,10 @@ def render_category_tab(category_name, sub_services=None):
 
     # --- TABLE CONFIG ---
     if category_name == "Transformer Servicing":
-        cols_order = ["Date_Received", "Client_Name", "Client_Contact", "Service_Type", "Notes", "Quote_Amount", "WA_Link", "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"]
+        cols_order = ["Date_Received", "Client_Name", "Client_Contact", "Place_Received", "Service_Type", "Notes", "Quote_Amount", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup", "WA_Link", "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"]
     else:
-        cols_order = ["Date", "Client_Name", "Client_Contact", "Service_Type", "Notes", "Location", "WA_Link", "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"]
+        # Technician Removed from here as requested
+        cols_order = ["Date", "Client_Name", "Client_Contact", "Location", "Service_Type", "Notes", "WA_Link", "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"]
     
     col_config = {
         "Select": st.column_config.CheckboxColumn("Edit", width="small", default=False),
@@ -196,8 +192,13 @@ def render_category_tab(category_name, sub_services=None):
         "OneDrive_Link": st.column_config.LinkColumn("Drive", width="medium"),
         "Completed": st.column_config.CheckboxColumn("Done"),
         "Invoiced": st.column_config.CheckboxColumn("Inv"),
+        # Dates
         "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
         "Date_Received": st.column_config.DateColumn("Recv", format="YYYY-MM-DD"),
+        "Date_Sent_To_PT": st.column_config.DateColumn("Sent PT", format="YYYY-MM-DD"),
+        "Date_Back_From_PT": st.column_config.DateColumn("Back PT", format="YYYY-MM-DD"),
+        "Date_Client_Pickup": st.column_config.DateColumn("Pickup", format="YYYY-MM-DD"),
+        # Text
         "Service_Type": st.column_config.SelectboxColumn("Service", options=sub_services or []),
         "Notes": st.column_config.TextColumn("Notes", width="large")
     }
@@ -229,10 +230,8 @@ def render_category_tab(category_name, sub_services=None):
             key=f"ed_{category_name}_{key_suf}"
         )
 
-        # UPDATE LOCAL STATE ONLY (Batched)
+        # UPDATE LOCAL STATE
         data_cols = [c for c in final_cols if c not in ["Select", "WA_Link", "Photo_Link"]]
-        
-        # Check if data changed
         if not edited[data_cols].astype(str).equals(df_show[data_cols].astype(str)):
             st.session_state["master_df"].loc[edited.index, data_cols] = edited[data_cols]
             st.session_state["unsaved_changes"] = True
@@ -274,6 +273,10 @@ def render_category_tab(category_name, sub_services=None):
                     edit_d["Place_Received"] = c1.text_input("Place", row.get("Place_Received"))
                     edit_d["Date_Sent_To_PT"] = c2.date_input("Sent PT", parse_date_safe(row.get("Date_Sent_To_PT")))
                     edit_d["Date_Back_From_PT"] = c2.date_input("Back PT", parse_date_safe(row.get("Date_Back_From_PT")))
+                else:
+                    c1, c2 = st.columns(2)
+                    edit_d["Date"] = c1.date_input("Date", parse_date_safe(row.get("Date")))
+                    edit_d["Technician"] = c2.text_input("Technician", row.get("Technician"))
                 
                 edit_d["Notes"] = st.text_area("Notes", row.get("Notes"))
                 up_new = st.file_uploader("Upload New File")
@@ -296,24 +299,19 @@ def render_category_tab(category_name, sub_services=None):
                     with st.spinner("Deleting..."):
                         sync_data(force_reload=True)
 
-# --- NEW FUNCTION: RENDER NOTES TAB ---
+# --- RENDER NOTES TAB ---
 def render_notes_tab():
     df = st.session_state["master_df"]
-    # Filter for General Notes
     notes_df = df[df["Category"] == "General Note"] if "Category" in df.columns else pd.DataFrame()
 
-    # --- ADD NOTE FORM ---
     with st.expander("➕ Add New Note", expanded=False):
         with st.form("add_note_form", clear_on_submit=True):
+            note_date = st.date_input("Date", datetime.now())
             note_content = st.text_area("Note Content")
             note_file = st.file_uploader("📎 Attach File (Optional)")
             
             if st.form_submit_button("💾 Save New Note"):
-                new_note = {
-                    "Date": datetime.now(), 
-                    "Category": "General Note", 
-                    "Notes": note_content
-                }
+                new_note = {"Date": note_date, "Category": "General Note", "Notes": note_content}
                 if note_file:
                     ext = note_file.name.split('.')[-1]
                     link = upload_to_drive(note_file, f"Note_{datetime.now().strftime('%M%S')}.{ext}")
@@ -330,16 +328,11 @@ def render_notes_tab():
         st.info("No notes found.")
         return
 
-    # --- NOTES TABLE ---
-    # Setup Display Data
     df_show = notes_df.copy()
     df_show.insert(0, "Select", False)
-    
-    # Check selection
     if st.session_state["selected_idx"] in df_show.index:
         df_show.at[st.session_state["selected_idx"], "Select"] = True
 
-    # Columns to show
     cols_order = ["Date", "Notes", "Photo_Link"]
     final_cols = ["Select"] + [c for c in cols_order if c in df_show.columns]
 
@@ -359,14 +352,12 @@ def render_notes_tab():
         key="editor_notes"
     )
 
-    # --- UPDATE LOGIC (Quick Edit Text) ---
     data_cols = [c for c in final_cols if c not in ["Select", "Photo_Link"]]
     if not edited[data_cols].astype(str).equals(df_show[data_cols].astype(str)):
         st.session_state["master_df"].loc[edited.index, data_cols] = edited[data_cols]
         st.session_state["unsaved_changes"] = True
         st.rerun()
 
-    # --- SELECT LOGIC ---
     sel = edited[edited["Select"] == True]
     if not sel.empty:
         if sel.index[0] != st.session_state["selected_idx"]:
@@ -376,26 +367,18 @@ def render_notes_tab():
         st.session_state["selected_idx"] = None
         st.rerun()
 
-    # --- EDIT NOTE FORM ---
     sel_idx = st.session_state["selected_idx"]
     if sel_idx is not None and sel_idx in st.session_state["master_df"].index:
         row = st.session_state["master_df"].loc[sel_idx]
-        
-        # Only show if it's a Note
         if row.get("Category") == "General Note":
             st.divider()
             st.markdown(f"### ✏️ Editing Note")
-            
             with st.form(f"edit_note_{sel_idx}"):
                 edit_d = row.to_dict()
-                
                 edit_d["Date"] = st.date_input("Date", parse_date_safe(row.get("Date")))
                 edit_d["Notes"] = st.text_area("Content", row.get("Notes"))
-                
                 curr_file = row.get("Photo_Link", "")
-                if curr_file and len(str(curr_file)) > 5:
-                    st.caption(f"Current File: [View]({curr_file})")
-                
+                if curr_file and len(str(curr_file)) > 5: st.caption(f"Current File: [View]({curr_file})")
                 up_new = st.file_uploader("Replace File")
 
                 c_save, c_del = st.columns([1, 1])
@@ -404,28 +387,21 @@ def render_notes_tab():
                         if up_new:
                             ext = up_new.name.split('.')[-1]
                             edit_d["Photo_Link"] = upload_to_drive(up_new, f"Update_Note_{sel_idx}.{ext}")
-                        
-                        # Update Local
                         for k, v in edit_d.items():
                             if isinstance(v, (datetime, pd.Timestamp)): v = v.strftime("%Y-%m-%d")
                             st.session_state["master_df"].at[sel_idx, k] = v
-                        
-                        with st.spinner("Saving..."):
-                            sync_data(force_reload=True)
-
+                        with st.spinner("Saving..."): sync_data(force_reload=True)
                 with c_del:
                     if st.form_submit_button("🗑️ Delete Note"):
                         st.session_state["master_df"] = st.session_state["master_df"].drop(sel_idx).reset_index(drop=True)
                         st.session_state["selected_idx"] = None
-                        with st.spinner("Deleting..."):
-                            sync_data(force_reload=True)
+                        with st.spinner("Deleting..."): sync_data(force_reload=True)
 
 # --- MAIN ---
 def main():
     c1, c2 = st.columns([3, 1])
     c1.title("⚡ UELCO-MANAGER")
     
-    # REFRESH / SYNC BUTTON
     if st.session_state["unsaved_changes"]:
         status = '<div class="status-box unsaved">⚠️ Unsaved Changes - Click Sync</div>'
         btn_label = "💾 Save & Sync"
@@ -440,14 +416,13 @@ def main():
 
     st.markdown(f'<a href="{ONEDRIVE_URL}" target="_blank" class="header-link">📂 Open OneDrive</a>', unsafe_allow_html=True)
 
-    t1, t2, t3, t4 = st.tabs(["💰 Sales", "⚡ Transformer", "🔌 Cables", "📝 Notes"])
+    t1, t2, t3, t4 = st.tabs(["💰 Sales", "⚡ Transformer Servicing", "🔌 Fault Finding", "📝 Notes"])
     
-    with t1: render_category_tab("Sales & Install", ["Order", "Order + Delivery", "Order + Installation", "Quoted", "To Quote"])
+    with t1: render_category_tab("Sales", ["Order", "Order + Delivery", "Order + Installation", "Quoted", "To Quote"])
     with t2: render_category_tab("Transformer Servicing", ["Oil Change", "Gasket Replacement", "General Service", "Testing", "Quoted", "To Quote"])
-    with t3: render_category_tab("Cable Faults", ["Thumping/Locating", "Jointing", "Quoted", "To Quote"])
+    with t3: render_category_tab("Fault Finding", ["Thumping/Locating", "Jointing", "Quoted", "To Quote"])
     
-    with t4:
-        render_notes_tab()
+    with t4: render_notes_tab()
 
 if __name__ == "__main__":
     main()
