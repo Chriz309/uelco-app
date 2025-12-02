@@ -193,7 +193,6 @@ def render_category_tab(category_name, sub_services=None):
         "Select": st.column_config.CheckboxColumn("Edit", width="small", default=False),
         "WA_Link": st.column_config.LinkColumn("Chat", display_text="WhatsApp"),
         "Photo_Link": st.column_config.LinkColumn("File", display_text="Open"),
-        # REMOVED display_text="Folder" so you can paste URLS
         "OneDrive_Link": st.column_config.LinkColumn("Drive", width="medium"),
         "Completed": st.column_config.CheckboxColumn("Done"),
         "Invoiced": st.column_config.CheckboxColumn("Inv"),
@@ -226,27 +225,18 @@ def render_category_tab(category_name, sub_services=None):
             use_container_width=True, 
             hide_index=True,
             column_config=col_config,
-            # Removed OneDrive_Link from disabled so it is editable
             disabled=["WA_Link", "Photo_Link"],
             key=f"ed_{category_name}_{key_suf}"
         )
 
         # UPDATE LOCAL STATE ONLY (Batched)
-        data_cols = [c for c in final_cols if c not in ["Select", "WA_Link", "Photo_Link", "OneDrive_Link"]]
+        data_cols = [c for c in final_cols if c not in ["Select", "WA_Link", "Photo_Link"]]
         
         # Check if data changed
         if not edited[data_cols].astype(str).equals(df_show[data_cols].astype(str)):
-            # Safe assignment
             st.session_state["master_df"].loc[edited.index, data_cols] = edited[data_cols]
             st.session_state["unsaved_changes"] = True
             st.rerun()
-            
-        # Check if OneDrive Link changed specifically (since it's not in data_cols above for safety, let's catch it)
-        if "OneDrive_Link" in edited.columns:
-             if not edited["OneDrive_Link"].astype(str).equals(df_show["OneDrive_Link"].astype(str)):
-                st.session_state["master_df"].loc[edited.index, "OneDrive_Link"] = edited["OneDrive_Link"]
-                st.session_state["unsaved_changes"] = True
-                st.rerun()
 
         # Handle Select
         sel = edited[edited["Select"] == True]
@@ -306,6 +296,130 @@ def render_category_tab(category_name, sub_services=None):
                     with st.spinner("Deleting..."):
                         sync_data(force_reload=True)
 
+# --- NEW FUNCTION: RENDER NOTES TAB ---
+def render_notes_tab():
+    df = st.session_state["master_df"]
+    # Filter for General Notes
+    notes_df = df[df["Category"] == "General Note"] if "Category" in df.columns else pd.DataFrame()
+
+    # --- ADD NOTE FORM ---
+    with st.expander("➕ Add New Note", expanded=False):
+        with st.form("add_note_form", clear_on_submit=True):
+            note_content = st.text_area("Note Content")
+            note_file = st.file_uploader("📎 Attach File (Optional)")
+            
+            if st.form_submit_button("💾 Save New Note"):
+                new_note = {
+                    "Date": datetime.now(), 
+                    "Category": "General Note", 
+                    "Notes": note_content
+                }
+                if note_file:
+                    ext = note_file.name.split('.')[-1]
+                    link = upload_to_drive(note_file, f"Note_{datetime.now().strftime('%M%S')}.{ext}")
+                    new_note["Photo_Link"] = link or ""
+                
+                st.session_state["master_df"] = pd.concat([st.session_state["master_df"], pd.DataFrame([new_note])], ignore_index=True)
+                with st.spinner("Saving Note..."):
+                    sync_data(force_reload=True)
+
+    st.divider()
+    st.subheader("📝 My Notes")
+
+    if notes_df.empty:
+        st.info("No notes found.")
+        return
+
+    # --- NOTES TABLE ---
+    # Setup Display Data
+    df_show = notes_df.copy()
+    df_show.insert(0, "Select", False)
+    
+    # Check selection
+    if st.session_state["selected_idx"] in df_show.index:
+        df_show.at[st.session_state["selected_idx"], "Select"] = True
+
+    # Columns to show
+    cols_order = ["Date", "Notes", "Photo_Link"]
+    final_cols = ["Select"] + [c for c in cols_order if c in df_show.columns]
+
+    col_config = {
+        "Select": st.column_config.CheckboxColumn("Edit", width="small", default=False),
+        "Photo_Link": st.column_config.LinkColumn("File", display_text="Open"),
+        "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+        "Notes": st.column_config.TextColumn("Content", width="large")
+    }
+
+    edited = st.data_editor(
+        df_show[final_cols], 
+        use_container_width=True, 
+        hide_index=True,
+        column_config=col_config,
+        disabled=["Photo_Link"],
+        key="editor_notes"
+    )
+
+    # --- UPDATE LOGIC (Quick Edit Text) ---
+    data_cols = [c for c in final_cols if c not in ["Select", "Photo_Link"]]
+    if not edited[data_cols].astype(str).equals(df_show[data_cols].astype(str)):
+        st.session_state["master_df"].loc[edited.index, data_cols] = edited[data_cols]
+        st.session_state["unsaved_changes"] = True
+        st.rerun()
+
+    # --- SELECT LOGIC ---
+    sel = edited[edited["Select"] == True]
+    if not sel.empty:
+        if sel.index[0] != st.session_state["selected_idx"]:
+            st.session_state["selected_idx"] = sel.index[0]
+            st.rerun()
+    elif st.session_state["selected_idx"] in edited.index and not edited.at[st.session_state["selected_idx"], "Select"]:
+        st.session_state["selected_idx"] = None
+        st.rerun()
+
+    # --- EDIT NOTE FORM ---
+    sel_idx = st.session_state["selected_idx"]
+    if sel_idx is not None and sel_idx in st.session_state["master_df"].index:
+        row = st.session_state["master_df"].loc[sel_idx]
+        
+        # Only show if it's a Note
+        if row.get("Category") == "General Note":
+            st.divider()
+            st.markdown(f"### ✏️ Editing Note")
+            
+            with st.form(f"edit_note_{sel_idx}"):
+                edit_d = row.to_dict()
+                
+                edit_d["Date"] = st.date_input("Date", parse_date_safe(row.get("Date")))
+                edit_d["Notes"] = st.text_area("Content", row.get("Notes"))
+                
+                curr_file = row.get("Photo_Link", "")
+                if curr_file and len(str(curr_file)) > 5:
+                    st.caption(f"Current File: [View]({curr_file})")
+                
+                up_new = st.file_uploader("Replace File")
+
+                c_save, c_del = st.columns([1, 1])
+                with c_save:
+                    if st.form_submit_button("💾 Save Changes"):
+                        if up_new:
+                            ext = up_new.name.split('.')[-1]
+                            edit_d["Photo_Link"] = upload_to_drive(up_new, f"Update_Note_{sel_idx}.{ext}")
+                        
+                        # Update Local
+                        for k, v in edit_d.items():
+                            if isinstance(v, (datetime, pd.Timestamp)): v = v.strftime("%Y-%m-%d")
+                            st.session_state["master_df"].at[sel_idx, k] = v
+                        
+                        with st.spinner("Saving..."):
+                            sync_data(force_reload=True)
+
+                with c_del:
+                    if st.form_submit_button("🗑️ Delete Note"):
+                        st.session_state["master_df"] = st.session_state["master_df"].drop(sel_idx).reset_index(drop=True)
+                        st.session_state["selected_idx"] = None
+                        with st.spinner("Deleting..."):
+                            sync_data(force_reload=True)
+
 # --- MAIN ---
 def main():
     c1, c2 = st.columns([3, 1])
@@ -333,21 +447,7 @@ def main():
     with t3: render_category_tab("Cable Faults", ["Thumping/Locating", "Jointing", "Quoted", "To Quote"])
     
     with t4:
-        st.header("📝 Notes")
-        with st.form("new_note"):
-            txt = st.text_area("Note"); up = st.file_uploader("File")
-            if st.form_submit_button("Pin Note"):
-                d = {"Date": datetime.now(), "Category": "General Note", "Notes": txt}
-                if up: d["Photo_Link"] = upload_to_drive(up, f"Note_{datetime.now()}.jpg")
-                st.session_state["master_df"] = pd.concat([st.session_state["master_df"], pd.DataFrame([d])], ignore_index=True)
-                with st.spinner("Saving Note..."):
-                    sync_data(force_reload=True)
-        
-        st.divider()
-        n_df = st.session_state["master_df"]
-        n_df = n_df[n_df["Category"] == "General Note"] if "Category" in n_df.columns else pd.DataFrame()
-        if not n_df.empty:
-            st.data_editor(n_df[["Date", "Notes", "Photo_Link"]], hide_index=True, column_config={"Photo_Link": st.column_config.LinkColumn("File")})
+        render_notes_tab()
 
 if __name__ == "__main__":
     main()
