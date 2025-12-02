@@ -84,39 +84,29 @@ def parse_date_safe(date_val):
     try: return pd.to_datetime(date_val).date()
     except: return None
 
-# --- CORE DATA LOGIC (ROBUST VERSION) ---
+# --- CORE DATA LOGIC ---
 
 def load_data():
-    """Fetches data and ensures ALL required columns exist with correct types."""
+    """Fetches data from Google Sheets."""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         df = conn.read(worksheet="Sheet1", ttl=0).dropna(how='all')
         
-        # 1. Force Creation of Missing Columns (Self-Repair Schema)
-        expected_cols = [
-            "Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup",
-            "Completed", "Invoiced", "Client_Name", "Client_Contact", "Service_Type", "Notes", 
-            "Location", "Place_Received", "Quote_Amount", "Technician", "Category", 
-            "Photo_Link", "OneDrive_Link"
-        ]
+        # Self-Repair: Ensure columns exist
+        expected_cols = ["Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup", "Completed", "Invoiced", "Client_Name", "Client_Contact", "Service_Type", "Notes", "Location", "Place_Received", "Quote_Amount", "Technician", "Category", "Photo_Link", "OneDrive_Link"]
         for col in expected_cols:
-            if col not in df.columns:
-                df[col] = pd.NA
+            if col not in df.columns: df[col] = pd.NA
 
-        # 2. Strict Type Enforcement (Prevents StreamlitAPIException)
-        # Dates
-        date_cols = ["Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup"]
-        for c in date_cols:
+        # Normalize Dates
+        for c in ["Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup"]:
             df[c] = pd.to_datetime(df[c], errors='coerce')
-            
-        # Booleans
+        # Normalize Booleans
         for c in ["Completed", "Invoiced"]:
             df[c] = df[c].fillna(False).astype(bool)
-            
-        # Strings (Everything else)
-        str_cols = [c for c in df.columns if c not in date_cols and c not in ["Completed", "Invoiced"]]
-        for c in str_cols:
-            df[c] = df[c].astype(str).replace("nan", "").replace("None", "").replace("<NA>", "")
+        # Normalize Strings
+        for c in expected_cols:
+            if c not in ["Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup", "Completed", "Invoiced"]:
+                df[c] = df[c].fillna("").astype(str)
             
         return df
     except Exception as e:
@@ -127,11 +117,12 @@ def sync_data(force_reload=False):
     """Writes the current Local State to Google Sheets, then reloads."""
     conn = st.connection("gsheets", type=GSheetsConnection)
     df = st.session_state["master_df"]
-    # Ensure Dates are converted to string for storage
+    
+    # Convert Dates to String for Storage
     save_df = df.copy()
     for col in save_df.select_dtypes(include=['datetime64']).columns:
         save_df[col] = save_df[col].dt.strftime('%Y-%m-%d').replace("NaT", "")
-        
+
     conn.update(worksheet="Sheet1", data=save_df)
     st.cache_data.clear()
     
@@ -156,7 +147,7 @@ def render_category_tab(category_name, sub_services=None):
     category_df = df[df["Category"] == category_name]
 
     # --- ADD NEW (INSTANT SAVE) ---
-    with st.expander(f"➕ Add New {category_name}", expanded=False):
+    with st.expander(f"➕ Add New Job ({category_name})", expanded=False):
         with st.form(f"add_form_{category_name}", clear_on_submit=True):
             input_data = {"Category": category_name}
             
@@ -190,7 +181,6 @@ def render_category_tab(category_name, sub_services=None):
                 
                 # Append to Local & Sync
                 new_row = pd.DataFrame([input_data])
-                # Ensure new row has compatible types
                 st.session_state["master_df"] = pd.concat([st.session_state["master_df"], new_row], ignore_index=True)
                 with st.spinner("Saving..."):
                     sync_data(force_reload=True)
@@ -206,7 +196,7 @@ def render_category_tab(category_name, sub_services=None):
     if category_name == "Transformer Servicing":
         cols_order = ["Date_Received", "Client_Name", "Client_Contact", "Place_Received", "Service_Type", "Notes", "Quote_Amount", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup", "WA_Link", "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"]
     else:
-        # Technician Removed from here as requested
+        # Sales & Faults (No Technician Summary)
         cols_order = ["Date", "Client_Name", "Client_Contact", "Location", "Service_Type", "Notes", "WA_Link", "Photo_Link", "OneDrive_Link", "Completed", "Invoiced"]
     
     col_config = {
@@ -256,10 +246,7 @@ def render_category_tab(category_name, sub_services=None):
 
         # UPDATE LOCAL STATE
         data_cols = [c for c in final_cols if c not in ["Select", "WA_Link", "Photo_Link"]]
-        
-        # Comparison logic: Convert both to str to avoid type issues (Naive vs Aware datetimes)
         if not edited[data_cols].astype(str).equals(df_show[data_cols].astype(str)):
-            # Safe Update
             st.session_state["master_df"].loc[edited.index, data_cols] = edited[data_cols]
             st.session_state["unsaved_changes"] = True
             st.rerun()
@@ -290,6 +277,7 @@ def render_category_tab(category_name, sub_services=None):
             c_h, c_b = st.columns([2, 1])
             c_h.markdown(f"### ✏️ Editing: {row.get('Client_Name', 'Job')}")
             
+            # Key added to prevent duplicate ID error
             c_b.download_button("📄 Download Job Card", create_job_card(row.to_dict()), f"Job_{sel_idx}.pdf", "application/pdf", key=f"dl_pdf_{category_name}_{sel_idx}")
 
             with st.form(f"edit_{sel_idx}"):
@@ -314,7 +302,6 @@ def render_category_tab(category_name, sub_services=None):
                         edit_d["Photo_Link"] = upload_to_drive(up_new, f"Update_{sel_idx}.{ext}")
                     
                     for k, v in edit_d.items():
-                        # Keep it as datetime in session state
                         if isinstance(v, (datetime, pd.Timestamp)): 
                             st.session_state["master_df"].at[sel_idx, k] = v
                         else:
@@ -347,7 +334,9 @@ def render_notes_tab():
                     link = upload_to_drive(note_file, f"Note_{datetime.now().strftime('%M%S')}.{ext}")
                     new_note["Photo_Link"] = link or ""
                 
-                st.session_state["master_df"] = pd.concat([st.session_state["master_df"], pd.DataFrame([new_note])], ignore_index=True)
+                # Align columns
+                new_row = pd.DataFrame([new_note])
+                st.session_state["master_df"] = pd.concat([st.session_state["master_df"], new_row], ignore_index=True)
                 with st.spinner("Saving Note..."):
                     sync_data(force_reload=True)
 
@@ -450,9 +439,10 @@ def main():
 
     t1, t2, t3, t4 = st.tabs(["💰 Sales", "⚡ Transformer Servicing", "🔌 Fault Finding", "📝 Notes"])
     
-    with t1: render_category_tab("Sales", ["Order", "Order + Delivery", "Order + Installation", "Quoted", "To Quote"])
+    # MAPPED TO OLD CATEGORIES TO RECOVER DATA
+    with t1: render_category_tab("Sales & Install", ["Order", "Order + Delivery", "Order + Installation", "Quoted", "To Quote"])
     with t2: render_category_tab("Transformer Servicing", ["Oil Change", "Gasket Replacement", "General Service", "Testing", "Quoted", "To Quote"])
-    with t3: render_category_tab("Fault Finding", ["Thumping/Locating", "Jointing", "Quoted", "To Quote"])
+    with t3: render_category_tab("Cable Faults", ["Thumping/Locating", "Jointing", "Quoted", "To Quote"])
     
     with t4: render_notes_tab()
 
