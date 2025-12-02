@@ -84,21 +84,39 @@ def parse_date_safe(date_val):
     try: return pd.to_datetime(date_val).date()
     except: return None
 
-# --- CORE DATA LOGIC ---
+# --- CORE DATA LOGIC (ROBUST VERSION) ---
 
 def load_data():
-    """Fetches data from Google Sheets."""
+    """Fetches data and ensures ALL required columns exist with correct types."""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         df = conn.read(worksheet="Sheet1", ttl=0).dropna(how='all')
         
-        # Normalize
-        for c in ["Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT"]:
-            if c in df.columns: df[c] = pd.to_datetime(df[c], errors='coerce')
+        # 1. Force Creation of Missing Columns (Self-Repair Schema)
+        expected_cols = [
+            "Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup",
+            "Completed", "Invoiced", "Client_Name", "Client_Contact", "Service_Type", "Notes", 
+            "Location", "Place_Received", "Quote_Amount", "Technician", "Category", 
+            "Photo_Link", "OneDrive_Link"
+        ]
+        for col in expected_cols:
+            if col not in df.columns:
+                df[col] = pd.NA
+
+        # 2. Strict Type Enforcement (Prevents StreamlitAPIException)
+        # Dates
+        date_cols = ["Date", "Date_Received", "Date_Sent_To_PT", "Date_Back_From_PT", "Date_Client_Pickup"]
+        for c in date_cols:
+            df[c] = pd.to_datetime(df[c], errors='coerce')
+            
+        # Booleans
         for c in ["Completed", "Invoiced"]:
-            if c in df.columns: df[c] = df[c].fillna(False).astype(bool)
-        for c in ["Client_Name", "Client_Contact", "Service_Type", "Notes", "Location", "Place_Received", "Quote_Amount", "Technician", "Category", "Photo_Link", "OneDrive_Link"]:
-            if c in df.columns: df[c] = df[c].fillna("").astype(str)
+            df[c] = df[c].fillna(False).astype(bool)
+            
+        # Strings (Everything else)
+        str_cols = [c for c in df.columns if c not in date_cols and c not in ["Completed", "Invoiced"]]
+        for c in str_cols:
+            df[c] = df[c].astype(str).replace("nan", "").replace("None", "").replace("<NA>", "")
             
         return df
     except Exception as e:
@@ -109,7 +127,12 @@ def sync_data(force_reload=False):
     """Writes the current Local State to Google Sheets, then reloads."""
     conn = st.connection("gsheets", type=GSheetsConnection)
     df = st.session_state["master_df"]
-    conn.update(worksheet="Sheet1", data=df)
+    # Ensure Dates are converted to string for storage
+    save_df = df.copy()
+    for col in save_df.select_dtypes(include=['datetime64']).columns:
+        save_df[col] = save_df[col].dt.strftime('%Y-%m-%d').replace("NaT", "")
+        
+    conn.update(worksheet="Sheet1", data=save_df)
     st.cache_data.clear()
     
     if force_reload:
@@ -167,6 +190,7 @@ def render_category_tab(category_name, sub_services=None):
                 
                 # Append to Local & Sync
                 new_row = pd.DataFrame([input_data])
+                # Ensure new row has compatible types
                 st.session_state["master_df"] = pd.concat([st.session_state["master_df"], new_row], ignore_index=True)
                 with st.spinner("Saving..."):
                     sync_data(force_reload=True)
@@ -232,7 +256,10 @@ def render_category_tab(category_name, sub_services=None):
 
         # UPDATE LOCAL STATE
         data_cols = [c for c in final_cols if c not in ["Select", "WA_Link", "Photo_Link"]]
+        
+        # Comparison logic: Convert both to str to avoid type issues (Naive vs Aware datetimes)
         if not edited[data_cols].astype(str).equals(df_show[data_cols].astype(str)):
+            # Safe Update
             st.session_state["master_df"].loc[edited.index, data_cols] = edited[data_cols]
             st.session_state["unsaved_changes"] = True
             st.rerun()
@@ -287,8 +314,11 @@ def render_category_tab(category_name, sub_services=None):
                         edit_d["Photo_Link"] = upload_to_drive(up_new, f"Update_{sel_idx}.{ext}")
                     
                     for k, v in edit_d.items():
-                        if isinstance(v, (datetime, pd.Timestamp)): v = v.strftime("%Y-%m-%d")
-                        st.session_state["master_df"].at[sel_idx, k] = v
+                        # Keep it as datetime in session state
+                        if isinstance(v, (datetime, pd.Timestamp)): 
+                            st.session_state["master_df"].at[sel_idx, k] = v
+                        else:
+                            st.session_state["master_df"].at[sel_idx, k] = v
                     
                     with st.spinner("Saving..."):
                         sync_data(force_reload=True)
@@ -388,8 +418,10 @@ def render_notes_tab():
                             ext = up_new.name.split('.')[-1]
                             edit_d["Photo_Link"] = upload_to_drive(up_new, f"Update_Note_{sel_idx}.{ext}")
                         for k, v in edit_d.items():
-                            if isinstance(v, (datetime, pd.Timestamp)): v = v.strftime("%Y-%m-%d")
-                            st.session_state["master_df"].at[sel_idx, k] = v
+                            if isinstance(v, (datetime, pd.Timestamp)): 
+                                st.session_state["master_df"].at[sel_idx, k] = v
+                            else:
+                                st.session_state["master_df"].at[sel_idx, k] = v
                         with st.spinner("Saving..."): sync_data(force_reload=True)
                 with c_del:
                     if st.form_submit_button("🗑️ Delete Note"):
