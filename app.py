@@ -9,7 +9,7 @@ import re
 from fpdf import FPDF
 
 # --- CONFIGURATION ---
-APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwJcYe-EOQ9sDKoha3ZSNTVjxuh2EbL1rWYiBS5zvxZnPwK3bPD9nNtm1NGVI-_S_yNLQ/exec" 
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwdoNiRHqoUn5sI6eWVDL7oKvK_6WUSAEnM7Ua-xFkJYhrDwKsDos8gJJb6ZEyXKiR5/exec" 
 ONEDRIVE_URL = "https://uelcoservices-my.sharepoint.com/personal/sonelle_uelco_co_za/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fsonelle%5Fuelco%5Fco%5Fza%2FDocuments%2FUelco%20APP%20testing&viewid=610b061b%2Db513%2D4114%2D8c76%2D59a9d605bddf&ga=1"
 
 st.set_page_config(page_title="UELCO-MANAGER", layout="wide")
